@@ -1,6 +1,5 @@
 #import "Basic";
 #import "File";
-
 #import "ImJSON";
 
 Factory :: struct {
@@ -24,7 +23,7 @@ main :: () {
         assert(file_ok);
         defer free(file);
         
-        parser: Parser;
+        parser: JSON_Parser;
         init_parser(*parser, file, "factory.json");
         
         for get_root(*parser) {

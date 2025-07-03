@@ -2,18 +2,22 @@
     IMJSON -- An "immediate-mode" JSON parser inspired by TSoding's "jimp"
     
     This module makes heavy use of macros and for expansions to make parsing JSON very simple and clean.
+    See example.jai to see how to use the parser, it should be relatively self-explanatory.
+    
+    The JSON_Iterator fo_expansion will lazily parse the fields within an object or array, creating an child JSON_Iterator for each field within.
+    The parse_object and parse_array procs will check the type and identifier on the JSON_Iterator, and will begin parsing member fields/elements if they match.
     
     Each iterator points to its parent iterator, allowing one to traverse up current document structure when needed (for example, when reporting errors).
     Each iterator also points to the base JSON_Parser struct, which acts as a sort of general context for parsing.
     One of the nice things about this method of parsing is that it requires absolutely no heap allocations, since all of the iterators are stored on the stack.
     
-    Object and array for expansions will lazily parse the fields within, creating an JSON_Iterator for each field.
-    The parse_object and parse_array procs will check the type and identifier on the JSON_Iterator, and will begin parsing member fields/elements if they match.
+    When an error is encountered, the iterator is flagged so that the parent iterator can check it and bail out.
 */
 
 JSON_Parser :: struct {
     file:   string; // does not get modified while parsing
     lexer:  Lexer;
+    error:  string;
 }
 
 init_parser :: (parser: *JSON_Parser, file: string, file_path := "") {
@@ -43,6 +47,7 @@ JSON_Iterator :: struct {
     Flags :: enum_flags { IS_ROOT; HANDLED; ERROR; };
 }
 
+// Parses the next field in the file, assuming that we are currently inside the parent object/array provided and that object/array is not about to end.
 iterator_next :: (parent: *JSON_Iterator) -> bool, JSON_Iterator {
     lexer := *parent.parser.lexer;
     
@@ -94,22 +99,19 @@ iterator_next :: (parent: *JSON_Iterator) -> bool, JSON_Iterator {
 iterator_skip :: (iterator: *JSON_Iterator) -> bool {
     assert(iterator.flags & .HANDLED == 0);
     if iterator.type == {
-      case .OBJECT; return skip_aggr(iterator.parser);
-      case .ARRAY;  return skip_aggr(iterator.parser, IS_ARRAY = true);
+      case .OBJECT; #through;
+      case .ARRAY;  
+        return skip_aggr(iterator.parser, iterator.type == .ARRAY);
     }
     return true;
 }
 
-// NOTE: We assume this can never be called on the root object. (Because why would you ever do that?)
-//       If you do manually do this, it will not work right, because we don't pass is_root when calling check_object_end.
-skip_aggr :: (parser: *JSON_Parser, $IS_ARRAY := false) -> bool {
-    check_end :: #ifx IS_ARRAY then check_array_end else check_object_end;
-    
-    if !check_end(parser) {
+skip_aggr :: (parser: *JSON_Parser, is_array: bool, is_root := false) -> bool {
+    if !check_aggr_end(parser, is_array, is_root) {
         while 1 {
             token: Token;
             
-            #if !IS_ARRAY {
+            if !is_array {
                 token = get_token(*parser.lexer);
                 if token.type != .STRING {
                     report_error(parser, "Expected STRING for field name, but got %. %", token.type, token.text);
@@ -131,11 +133,9 @@ skip_aggr :: (parser: *JSON_Parser, $IS_ARRAY := false) -> bool {
               case .NUMBER;
               case .STRING;
                 
-              case .OBJECT_BEGIN;
-                if !skip_aggr(parser)  return false;
-                
+              case .OBJECT_BEGIN; #through;
               case .ARRAY_BEGIN;
-                if !skip_aggr(parser, IS_ARRAY)  return false;
+                if !skip_aggr(parser, token.type == .ARRAY_BEGIN)  return false;
                 
               case;
                 report_error(parser, "Unexpected % token: '%'", token.type, token.text);
@@ -143,7 +143,7 @@ skip_aggr :: (parser: *JSON_Parser, $IS_ARRAY := false) -> bool {
             }
             
             expect_another := expect_token_type(*parser.lexer, .COMMA);
-            is_end         := check_end(parser);
+            is_end         := check_aggr_end(parser, is_array, is_root);
             
             if is_end {
                 if expect_another {
@@ -185,8 +185,9 @@ format_location :: (builder: *String_Builder, using location: Source_Code_Locati
 
 // NOTE: This procedure will flag the iterator as hacing encountered an error, 
 //       which will result in the termination of parsing.
-report_error :: (using iterator: *JSON_Iterator, format: string, args: ..Any) {
+report_error :: (iterator: *JSON_Iterator, format: string, args: ..Any) {
     builder: String_Builder;
+    builder.allocator = temp;
     
     iterator.flags |= .ERROR;
     
@@ -197,15 +198,20 @@ report_error :: (using iterator: *JSON_Iterator, format: string, args: ..Any) {
     append(*builder, ": ");
     
     print(*builder, format, ..args);
-    log(builder_to_string(*builder));
+    
+    iterator.parser.error = builder_to_string(*builder);
+    log(iterator.parser.error);
 } @PrintLike
 
 report_error :: (using parser: *JSON_Parser, format: string, args: ..Any) {
     builder: String_Builder;
+    builder.allocator = temp;
     
     format_location(*builder, lexer.location);
     print(*builder, format, ..args);
-    log(builder_to_string(*builder));
+    
+    parser.error = builder_to_string(*builder);
+    log(parser.error);
 } @PrintLike
 
 
@@ -285,49 +291,68 @@ for_expansion :: (using iterator: *JSON_Iterator, $body: Code, for_flags: For_Fl
     iterator.flags |= .HANDLED;
 }
 
-check_aggr_end :: (using iterator: *JSON_Iterator) -> bool {
-    if iterator.type == {
-      case .OBJECT; return check_object_end(parser, (iterator.flags & .IS_ROOT).(bool));
-      case .ARRAY;  return check_array\_end(parser);
-    }
-    assert(false, "Invalid iterator type: %", type);
-    return false;
+check_aggr_end :: inline (iterator: *JSON_Iterator) -> bool {
+    return check_aggr_end(iterator.parser, iterator.type == .ARRAY, (iterator.flags & .IS_ROOT).(bool));
 }
 
-check_object_end :: inline (using parser: *JSON_Parser, is_root := false) -> bool {
-    return expect_token_type(*lexer, ifx is_root then .EOF else .OBJECT_END);
+check_aggr_end :: inline (parser: *JSON_Parser, is_array: bool, is_root: bool) -> bool {
+    if is_array  
+        then return check_array\_end(parser);
+        else return check_object_end(parser, is_root);
 }
 
-check_array_end :: inline (using parser: *JSON_Parser) -> bool {
-    return expect_token_type(*lexer, .ARRAY_END);
+check_object_end :: inline (parser: *JSON_Parser, is_root: bool) -> bool {
+    return expect_token_type(*parser.lexer, ifx is_root then .EOF else .OBJECT_END);
+}
+
+check_array_end :: inline (parser: *JSON_Parser) -> bool {
+    return expect_token_type(*parser.lexer, .ARRAY_END);
 }
 
 
 /*
-    Notes for myself, future implementation:
+    Notes to myself, for future implementation:
     
-    Tsoding makes a good point about objects with this kind of structure:
-    {
-        type: "Foo",
-        value: { ... }
-    }
-    where the value object needs to be parsed differently depending on the type.
-    if the value object is ordered before the value in the parent object, then we have a problem.
-    simple solution is just to say that the type must always come first, but that's probably technically not compliant with some JSON spec that says objects must be parsed in an order-independent way
-    perhaps we could implement some special flag on parse_field that tells the parser to scan ahead for this field in the object, that way if it is present we get its value right away or report an error
-    This scanning ahead could be more costly but at least it would be an option to get around this scenario
+    Order-dependent Parsing:
+        Tsoding makes a good point about objects with this kind of structure, 
+        where the value object needs to be parsed differently depending on the type:
+        {
+            type: "Foo",
+            value: { ... }
+        }
+        
+        If the value object is ordered before the value in the parent object, then we have a problem.
+        The simple solution is just to say that the type must always come first, but that's probably technically not compliant with some JSON spec which I just assume says objects must be parsed in an order-independent way.
+        Perhaps we could implement some special flag on parse_field that tells the parser to scan ahead for this field in the object, that way if it is present we get its value right away or report an error.
+        This scanning ahead could be more costly but at least it would be an option to get around this scenario.
+        
+        
+    Macro Stuff: 
+        This module seems like an interesting test case for macros, since ideally we would be able to add some features that require a sort of communication between nested macros.
+        
+        TODO: 
+            Prevent checking for matches on fields which have already been parsed.
+                We could accomplish this pretty easily if we had some 'static' specific for variables,
+                since we could just put a static bool in parse_field that gets set when the field is parsed, 
+                and check this before doing the full string comparison for the identifier.
+                Unfortunately, Jai does not have static variables, so a more creative solution will be required.
+            
+            Flag fields as .REQUIRED and report an error when the field is not found.
+                Like the above feature, this would be mad emuch easier if we had static variables.
+                However, even if we did, we would still need some extra logic that would check these values after parsing of the parent object has completed.
+                This could be done in a sort of validation pass, where we instrument the body code to pass some constant VALIDATION_PASS flag to all calls to parse_field, then include an #if VALIDATION_PASS code path 
+                This would be very magical though, and perhaps that's not what most users would want. However, it's still quite interesting to try!
+            
     
-    We could can also add easy flags for user to state that certain fields are mandatory and must be present
-        this will be a bit more tricky to implement since we can only check that all required fields were found in an object when exiting the object's scope
-        may require some allocations in order to make this work, or we can instead do a second pass after we are finished parsing an object to run validation code at the end
-        this is getting very magical though...
-    
-    In order to prevent duplicated checks for fields which have already been parsed, 
-    we would like that the parse_xxx procs each contain some internal state variables
-    but we cannot do this because there is no 'static' specifier in Jai...
-        We could potentially do something really zany where we introspect the body code in the for expansion
-        and then create some variable for tracking the state of each call to parse_field 
-    
+    Using the Context:
+        When I first started writing this parser I was using the Context to store the parser data instead of requiring the user to pass an iterator to every parse_xxx call.
+        While this makes the user code slightly cleaner, I ultimately decided it was better to avoid using the Context in this way unless it was going to provide a substantial benefit.
+        Maybe in the future it would be worthwhile to try this approach again if it is too cumbersome to try coordinating between nested macros in the way I am thinking may work.
+        
+        My proposal for a `do` keyword for multi-block macros sort of attempts to solve this case where we would like a macro to set up a temporary context for some complex procedure.
+        (Perhaps I will rewrite my thoughts on this and try to make a case for its utility.)
+        
+        
     
 */
 
@@ -360,11 +385,11 @@ Token_Type :: enum {
     COLON        :: #char ":";
     COMMA        :: #char ",";
     
-    NULL         :: 255 + 1;
-    TRUE         :: 255 + 2;
-    FALSE        :: 255 + 3;
-    STRING       :: 255 + 4;
-    NUMBER       :: 255 + 5;
+    STRING       :: 255 + 1;
+    NUMBER       :: 255 + 2;
+    NULL         :: 255 + 3;
+    TRUE         :: 255 + 4;
+    FALSE        :: 255 + 5;
 }
 
 Lexer :: struct {
@@ -459,7 +484,7 @@ lex_next_token :: (using lexer: *Lexer) -> Token {
                     return_error("utf8 decode error while parsing string");
                 }
                 if codepoint < 0x20 || codepoint > 0x10FFFF {
-                    return_error("invalid character while parsing string");
+                    return_error("Invalid character while parsing string");
                 }
                 if !advance(lexer, len)  return_error("Unexpected EOF while parsing string.");
             }
@@ -542,7 +567,7 @@ lex_number :: (using lexer: *Lexer) -> bool, string {
 Reflection :: #import "Reflection"; 
 
 // By default, we copy strings from the source file but do not convert escape sequences.
-set_value_from_string :: (any: Any, text: string, get_source_strings := false, do_convert_escape_sequences := false) -> bool {
+set_value_from_string :: (any: Any, text: string, get_source_strings := false, do_convert_escape_sequences := false) -> bool {    
     if any.type.type == .STRING {
         if get_source_strings {
             any.value_pointer.(*string).* = text;
