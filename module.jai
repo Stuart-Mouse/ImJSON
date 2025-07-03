@@ -91,47 +91,74 @@ iterator_next :: (parent: *Iterator) -> bool, Iterator {
     return true, next;
 }
 
-// TODO: we should actually validate the JSON structure as we skip over things. This is really hacky at the moment.
 iterator_skip :: (iterator: *Iterator) -> bool {
     assert(iterator.flags & .HANDLED == 0);
-    lexer := *iterator.parser.lexer;
-    
     if iterator.type == {
-      case .OBJECT; #through;
-      case .ARRAY;
-        depth := 0;
-        while 1 {
-            token := get_token(lexer);
-            if token.type == {
-              case .EOF;
-                report_error(iterator, "Unexpected EOF while scanning for end of unhandled %.", iterator.type);
-                return false;
-                
-              case .ERROR;
-                report_error(iterator, "Lexer error while scanning for end of unhandled %.", iterator.type);
-                return false;
-                
-              case .ARRAY_BEGIN;
-                depth += 1;
-                
-              case .ARRAY_END;
-                if depth == 0 { break; }
-                depth -= 1;
-                
-              case .OBJECT_BEGIN;
-                depth += 1;
-                
-              case .OBJECT_END;
-                if depth == 0 { break; }
-                depth -= 1;
-            }
-        }
+      case .OBJECT; return skip_aggr(iterator.parser);
+      case .ARRAY;  return skip_aggr(iterator.parser, IS_ARRAY = true);
     }
-    
     return true;
 }
 
-
+// NOTE: We assume this can never be called on the root object. (Because why would you ever do that?)
+//       If you do manually do this, it will not work right, because we don't pass is_root when calling check_object_end.
+skip_aggr :: (parser: *Parser, $IS_ARRAY := false) -> bool {
+    check_end :: #ifx IS_ARRAY then check_array_end else check_object_end;
+    
+    if !check_end(parser) {
+        while 1 {
+            token: Token;
+            
+            #if !IS_ARRAY {
+                token = get_token(*parser.lexer);
+                if token.type != .STRING {
+                    report_error(parser, "Expected STRING for field name, but got %. %", token.type, token.text);
+                    return false;
+                }
+                
+                token = get_token(*parser.lexer);
+                if token.type != .COLON {
+                    report_error(parser, "Expected COLON, but got %. %", token.type, token.text);
+                    return false;
+                }
+            }
+            
+            token = get_token(*parser.lexer);
+            if token.type == {
+              case .NULL;
+              case .TRUE;
+              case .FALSE;
+              case .NUMBER;
+              case .STRING;
+                
+              case .OBJECT_BEGIN;
+                if !skip_aggr(parser)  return false;
+                
+              case .ARRAY_BEGIN;
+                if !skip_aggr(parser, IS_ARRAY)  return false;
+                
+              case;
+                report_error(parser, "Unexpected % token: '%'", token.type, token.text);
+                return false;
+            }
+            
+            expect_another := expect_token_type(*parser.lexer, .COMMA);
+            is_end         := check_end(parser);
+            
+            if is_end {
+                if expect_another {
+                    report_error(parser, "Unexpected comma after field.");
+                    return false;
+                }
+                return true;
+            } else if !expect_another {
+                report_error(parser, "Expected a comma after field.");
+                return false;
+            }
+        }
+    } 
+    return true;
+}
 
 // TODO: what do we do if identifier is empty, e.g. arrays? 
 //       We should probably just store it_index on each Iterator as well...
@@ -149,25 +176,36 @@ get_path :: (iterator: *Iterator) -> string {
     return builder_to_string(*builder);
 }
 
+format_location :: (builder: *String_Builder, using location: Source_Code_Location) {
+    if fully_pathed_filename {
+        print(builder, "%:", fully_pathed_filename);
+    }
+    print(builder, "%,%: ", line_number, character_number);
+}
+
+// NOTE: This procedure will flag the iterator as hacing encountered an error, 
+//       which will result in the termination of parsing.
 report_error :: (using iterator: *Iterator, format: string, args: ..Any) {
     builder: String_Builder;
     
-    { using iterator.location;
-        if fully_pathed_filename {
-            print(*builder, "%:", fully_pathed_filename);
-        }
-        print(*builder, "%,%: ", line_number, character_number);
-    }
+    iterator.flags |= .ERROR;
+    
+    format_location(*builder, iterator.location);
     
     append(*builder, "@ ");
     append_path(*builder, iterator);
     append(*builder, ": ");
     
     print(*builder, format, ..args);
-    
     log(builder_to_string(*builder));
+} @PrintLike
+
+report_error :: (using parser: *Parser, format: string, args: ..Any) {
+    builder: String_Builder;
     
-    iterator.flags |= .ERROR;
+    format_location(*builder, lexer.location);
+    print(*builder, format, ..args);
+    log(builder_to_string(*builder));
 } @PrintLike
 
 
@@ -248,16 +286,20 @@ for_expansion :: (using iterator: *Iterator, $body: Code, for_flags: For_Flags) 
 }
 
 check_aggr_end :: (using iterator: *Iterator) -> bool {
-    if type == {
-      case .OBJECT;
-        return expect_token_type(*parser.lexer, ifx flags & .IS_ROOT then .EOF else .OBJECT_END);
-        
-      case .ARRAY;
-        return expect_token_type(*parser.lexer, .ARRAY_END);
+    if iterator.type == {
+      case .OBJECT; return check_object_end(parser, (iterator.flags & .IS_ROOT).(bool));
+      case .ARRAY;  return check_array\_end(parser);
     }
-    
     assert(false, "Invalid iterator type: %", type);
     return false;
+}
+
+check_object_end :: inline (using parser: *Parser, is_root := false) -> bool {
+    return expect_token_type(*lexer, ifx is_root then .EOF else .OBJECT_END);
+}
+
+check_array_end :: inline (using parser: *Parser) -> bool {
+    return expect_token_type(*lexer, .ARRAY_END);
 }
 
 
