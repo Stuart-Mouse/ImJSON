@@ -23,7 +23,7 @@ init_parser :: (parser: *Parser, file: string, file_path := "") {
 
 get_root :: (parser: *Parser) -> Iterator {
     iterator: Iterator;
-    iterator.type = .OBJECT;
+    iterator.type   = .OBJECT;
     iterator.parser = parser;
     iterator.flags  = .IS_ROOT;
     return iterator;
@@ -283,6 +283,10 @@ check_aggr_end :: (using iterator: *Iterator) -> bool {
     In order to prevent duplicated checks for fields which have already been parsed, 
     we would like that the parse_xxx procs each contain some internal state variables
     but we cannot do this because there is no 'static' specifier in Jai...
+        We could potentially do something really zany where we introspect the body code in the for expansion
+        and then create some variable for tracking the state of each call to parse_field 
+    
+    
 */
 
 #scope_module
@@ -501,7 +505,7 @@ set_value_from_string :: (any: Any, text: string, get_source_strings := false, d
         if get_source_strings {
             any.value_pointer.(*string).* = text;
         } else if do_convert_escape_sequences {
-            str, ok := convert_escape_sequences(text);
+            ok, str := convert_escape_sequences(text);
             if !ok {
                 free(str);
                 return false;
@@ -515,14 +519,14 @@ set_value_from_string :: (any: Any, text: string, get_source_strings := false, d
     return Reflection.set_value_from_string(any, text);
 }
 
-convert_escape_sequences :: (text: string) -> string, bool {
+convert_escape_sequences :: (text: string) -> bool, string {
     builder: String_Builder;
     ok := convert_escape_sequences(*builder, text);
     if !ok {
         free_buffers(*builder);
-        return "", false;
+        return false, "";
     }
-    return builder_to_string(*builder), true;
+    return true, builder_to_string(*builder);
 }
 
 convert_escape_sequences :: (builder: *String_Builder, text: string) -> bool {
