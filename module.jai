@@ -4,37 +4,37 @@
     This module makes heavy use of macros and for expansions to make parsing JSON very simple and clean.
     
     Each iterator points to its parent iterator, allowing one to traverse up current document structure when needed (for example, when reporting errors).
-    Each iterator also points to the base Parser struct, which acts as a sort of general context for parsing.
+    Each iterator also points to the base JSON_Parser struct, which acts as a sort of general context for parsing.
     One of the nice things about this method of parsing is that it requires absolutely no heap allocations, since all of the iterators are stored on the stack.
     
-    Object and array for expansions will lazily parse the fields within, creating an Iterator for each field.
-    The parse_object and parse_array procs will check the type and identifier on the Iterator, and will begin parsing member fields/elements if they match.
+    Object and array for expansions will lazily parse the fields within, creating an JSON_Iterator for each field.
+    The parse_object and parse_array procs will check the type and identifier on the JSON_Iterator, and will begin parsing member fields/elements if they match.
 */
 
-Parser :: struct {
+JSON_Parser :: struct {
     file:   string; // does not get modified while parsing
     lexer:  Lexer;
 }
 
-init_parser :: (parser: *Parser, file: string, file_path := "") {
+init_parser :: (parser: *JSON_Parser, file: string, file_path := "") {
     parser.file = file;
     init_lexer(*parser.lexer, file, file_path);   
 }
 
-get_root :: (parser: *Parser) -> Iterator {
-    iterator: Iterator;
+get_root :: (parser: *JSON_Parser) -> JSON_Iterator {
+    iterator: JSON_Iterator;
     iterator.type   = .OBJECT;
     iterator.parser = parser;
     iterator.flags  = .IS_ROOT;
     return iterator;
 }
 
-Iterator :: struct {
+JSON_Iterator :: struct {
     Iterator_Type :: enum { UNINITIALIZED :: 0; FIELD; OBJECT; ARRAY; };
     
     type:       Iterator_Type;
-    parser:     *Parser;
-    parent:     *Iterator;
+    parser:     *JSON_Parser;
+    parent:     *JSON_Iterator;
     identifier: string;
     value:      string;
     location:   Source_Code_Location;
@@ -43,10 +43,10 @@ Iterator :: struct {
     Flags :: enum_flags { IS_ROOT; HANDLED; ERROR; };
 }
 
-iterator_next :: (parent: *Iterator) -> bool, Iterator {
+iterator_next :: (parent: *JSON_Iterator) -> bool, JSON_Iterator {
     lexer := *parent.parser.lexer;
     
-    next: Iterator;
+    next: JSON_Iterator;
     next.parent = parent;
     next.parser = parent.parser;
     
@@ -91,7 +91,7 @@ iterator_next :: (parent: *Iterator) -> bool, Iterator {
     return true, next;
 }
 
-iterator_skip :: (iterator: *Iterator) -> bool {
+iterator_skip :: (iterator: *JSON_Iterator) -> bool {
     assert(iterator.flags & .HANDLED == 0);
     if iterator.type == {
       case .OBJECT; return skip_aggr(iterator.parser);
@@ -102,7 +102,7 @@ iterator_skip :: (iterator: *Iterator) -> bool {
 
 // NOTE: We assume this can never be called on the root object. (Because why would you ever do that?)
 //       If you do manually do this, it will not work right, because we don't pass is_root when calling check_object_end.
-skip_aggr :: (parser: *Parser, $IS_ARRAY := false) -> bool {
+skip_aggr :: (parser: *JSON_Parser, $IS_ARRAY := false) -> bool {
     check_end :: #ifx IS_ARRAY then check_array_end else check_object_end;
     
     if !check_end(parser) {
@@ -161,8 +161,8 @@ skip_aggr :: (parser: *Parser, $IS_ARRAY := false) -> bool {
 }
 
 // TODO: what do we do if identifier is empty, e.g. arrays? 
-//       We should probably just store it_index on each Iterator as well...
-append_path :: (builder: *String_Builder, iterator: *Iterator) {
+//       We should probably just store it_index on each JSON_Iterator as well...
+append_path :: (builder: *String_Builder, iterator: *JSON_Iterator) {
     if iterator.parent {
         append_path(builder, iterator.parent);
         append(builder, "/");
@@ -170,7 +170,7 @@ append_path :: (builder: *String_Builder, iterator: *Iterator) {
     append(builder, iterator.identifier);
 }
 
-get_path :: (iterator: *Iterator) -> string {
+get_path :: (iterator: *JSON_Iterator) -> string {
     builder: String_Builder;
     append_path(*builder, iterator);
     return builder_to_string(*builder);
@@ -185,7 +185,7 @@ format_location :: (builder: *String_Builder, using location: Source_Code_Locati
 
 // NOTE: This procedure will flag the iterator as hacing encountered an error, 
 //       which will result in the termination of parsing.
-report_error :: (using iterator: *Iterator, format: string, args: ..Any) {
+report_error :: (using iterator: *JSON_Iterator, format: string, args: ..Any) {
     builder: String_Builder;
     
     iterator.flags |= .ERROR;
@@ -200,7 +200,7 @@ report_error :: (using iterator: *Iterator, format: string, args: ..Any) {
     log(builder_to_string(*builder));
 } @PrintLike
 
-report_error :: (using parser: *Parser, format: string, args: ..Any) {
+report_error :: (using parser: *JSON_Parser, format: string, args: ..Any) {
     builder: String_Builder;
     
     format_location(*builder, lexer.location);
@@ -212,7 +212,7 @@ report_error :: (using parser: *Parser, format: string, args: ..Any) {
 // Field parsing is wrapped in a macro so that we can do some funky magic.
 // Mostly for the sake of error handling and doing multi-pass stuff
 // The parse_object and parse_array for expansions maybe in the future get some special logic that will change how parse_field operates on a second validation pass
-parse_field :: (iterator: *Iterator, identifier: string, value: Any) -> bool #expand {
+parse_field :: (iterator: *JSON_Iterator, identifier: string, value: Any) -> bool #expand {
     if iterator.identifier != identifier   return false;
     
     if !set_value_from_string(value, iterator.value) {
@@ -227,7 +227,7 @@ parse_field :: (iterator: *Iterator, identifier: string, value: Any) -> bool #ex
 // This procedure is not intended to be called in the traditional way. 
 // You will notice that it does not in fact actually do any parsing in itself! 
 // Refer to example.jai for proper use.
-parse_object :: inline (iterator: *Iterator, identifier: string = "") -> *Iterator {
+parse_object :: inline (iterator: *JSON_Iterator, identifier: string = "") -> *JSON_Iterator {
     if iterator.identifier != identifier   return null;
     if iterator.type != .OBJECT {
         report_error(iterator, "Expected OBJECT, but got %.", iterator.type);
@@ -239,7 +239,7 @@ parse_object :: inline (iterator: *Iterator, identifier: string = "") -> *Iterat
 // This procedure is not intended to be called in the traditional way. 
 // You will notice that it does not in fact actually do any parsing in itself! 
 // Refer to example.jai for proper use.
-parse_array :: inline (iterator: *Iterator, identifier: string = "") -> *Iterator {
+parse_array :: inline (iterator: *JSON_Iterator, identifier: string = "") -> *JSON_Iterator {
     if iterator.identifier != identifier   return null;
     if iterator.type != .ARRAY {
         report_error(iterator, "Expected ARRAY, but got %.", iterator.type);
@@ -248,7 +248,7 @@ parse_array :: inline (iterator: *Iterator, identifier: string = "") -> *Iterato
     return iterator;
 }
 
-for_expansion :: (using iterator: *Iterator, $body: Code, for_flags: For_Flags) #expand {
+for_expansion :: (using iterator: *JSON_Iterator, $body: Code, for_flags: For_Flags) #expand {
     if iterator == null      return;
     
     if !check_aggr_end(iterator) {
@@ -256,7 +256,7 @@ for_expansion :: (using iterator: *Iterator, $body: Code, for_flags: For_Flags) 
         while 1 { defer it_index += 1;
             it_ok, it_union := iterator_next(iterator);
             if !it_ok  return;
-            `it := (*it_union).(*Iterator);
+            `it := (*it_union).(*JSON_Iterator);
             
             #insert body;
             
@@ -285,7 +285,7 @@ for_expansion :: (using iterator: *Iterator, $body: Code, for_flags: For_Flags) 
     iterator.flags |= .HANDLED;
 }
 
-check_aggr_end :: (using iterator: *Iterator) -> bool {
+check_aggr_end :: (using iterator: *JSON_Iterator) -> bool {
     if iterator.type == {
       case .OBJECT; return check_object_end(parser, (iterator.flags & .IS_ROOT).(bool));
       case .ARRAY;  return check_array\_end(parser);
@@ -294,11 +294,11 @@ check_aggr_end :: (using iterator: *Iterator) -> bool {
     return false;
 }
 
-check_object_end :: inline (using parser: *Parser, is_root := false) -> bool {
+check_object_end :: inline (using parser: *JSON_Parser, is_root := false) -> bool {
     return expect_token_type(*lexer, ifx is_root then .EOF else .OBJECT_END);
 }
 
-check_array_end :: inline (using parser: *Parser) -> bool {
+check_array_end :: inline (using parser: *JSON_Parser) -> bool {
     return expect_token_type(*lexer, .ARRAY_END);
 }
 
