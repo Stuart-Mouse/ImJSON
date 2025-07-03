@@ -8,30 +8,8 @@
     One of the nice things about this method of parsing is that it requires absolutely no heap allocations, since all of the iterators are stored on the stack.
     
     Object and array for expansions will lazily parse the fields within, creating an Iterator for each field.
-    The parse_object and parse_array procs will check the type and identifier on the Iterator, and will 
-    
-    
-    It may seem a bit silly that we have separate types for the different iterators (as well as a union version), 
-    since Object_Iterator and Array_Iterator currently don't actually contain any unique members, 
-    but we need these distinct types in order to define separate for expansions for objects and arrays.
-    
-    I suppose we could instead just use named iterators for object/array.
-    perhaps after I get things working we try that out and see if it feels better or significantly reduces code size
-        so far the function-call style I think looks nicer, expecially if we want to name the iterator
-        however, using the named iterator proc style could remove the footgun that is writing `if parse_object` instead of `for parse_object`
-            can't actually do the named iterator style since we need to pass other parameters (expectexd identifier, flags) to the parse_object proc
-            and we also don't really want to do normal macro style instead of for expansion because there's not such an easy way to expose the iterators to the inner code (or rename them, for that matter)
-    
-    This does make me wish there was something like a `do` keyword for `for`-style macros that need other parameters
-    and this `do` can be followed with a else/then block which the macro can handle, which would be helpful here as we could attach success/fail case code 
-    would also be nice if some macro could be marked explicitly as a `do` so that it cannot be called like a regular macro, preventing the accidental use in an `if`
-    
-    
-    In order to prevent duplicated checks for fields which have already been parsed, 
-    we would like that the parse_xxx procs each contain some internal state variables
-    but we cannot do this because there is no 'static' specifier in Jai...
+    The parse_object and parse_array procs will check the type and identifier on the Iterator, and will begin parsing member fields/elements if they match.
 */
-
 
 Parser :: struct {
     file:   string; // does not get modified while parsing
@@ -43,41 +21,36 @@ init_parser :: (parser: *Parser, file: string, file_path := "") {
     init_lexer(*parser.lexer, file, file_path);   
 }
 
-get_root :: (parser: *Parser) -> Object_Iterator {
-    iterator: Object_Iterator;
+get_root :: (parser: *Parser) -> Iterator {
+    iterator: Iterator;
+    iterator.type = .OBJECT;
     iterator.parser = parser;
     iterator.flags  = .IS_ROOT;
     return iterator;
 }
 
-Iterator_Union :: union {
-    using #as base: Iterator;
-    field:  Field_Iterator;
-    object: Object_Iterator;
-    array:  Array_Iterator;
-}
-
 Iterator :: struct {
     Iterator_Type :: enum { UNINITIALIZED :: 0; FIELD; OBJECT; ARRAY; };
     
-    iterator_type:  Iterator_Type;
-    parser:         *Parser;
-    parent:         *Iterator;
-    identifier:     string;
-    location:       Source_Code_Location;
+    type:       Iterator_Type;
+    parser:     *Parser;
+    parent:     *Iterator;
+    identifier: string;
+    value:      string;
+    location:   Source_Code_Location;
+    flags:      Flags;
     
-    flags:         Flags;
     Flags :: enum_flags { IS_ROOT; HANDLED; ERROR; };
 }
 
-iterator_next :: (parent: *Iterator) -> bool, Iterator_Union {
+iterator_next :: (parent: *Iterator) -> bool, Iterator {
     lexer := *parent.parser.lexer;
     
-    next: Iterator_Union;
+    next: Iterator;
     next.parent = parent;
     next.parser = parent.parser;
     
-    if parent.iterator_type != .ARRAY {
+    if parent.type != .ARRAY {
         token := get_token(lexer);
         if token.type != .STRING {
             report_error(parent, "Expected STRING for field name, but got %. %", token.type, token.text);
@@ -100,14 +73,14 @@ iterator_next :: (parent: *Iterator) -> bool, Iterator_Union {
       case .FALSE;  #through;
       case .NUMBER; #through;
       case .STRING;
-        next.iterator_type = .FIELD;
-        next.field.value = token.text;
+        next.type = .FIELD;
+        next.value = token.text;
         
       case .OBJECT_BEGIN;
-        next.iterator_type = .OBJECT;
+        next.type = .OBJECT;
         
       case .ARRAY_BEGIN;
-        next.iterator_type = .ARRAY;
+        next.type = .ARRAY;
         
       case;
         report_error(parent, "Unexpected % token: '%'", token.type, token.text);
@@ -118,50 +91,37 @@ iterator_next :: (parent: *Iterator) -> bool, Iterator_Union {
     return true, next;
 }
 
+// TODO: we should actually validate the JSON structure as we skip over things. This is really hacky at the moment.
 iterator_skip :: (iterator: *Iterator) -> bool {
     assert(iterator.flags & .HANDLED == 0);
     lexer := *iterator.parser.lexer;
     
-    if iterator.iterator_type == {
-      case .OBJECT;
-        depth := 0;
-        while 1 {
-            token := get_token(lexer);
-            if token.type == {
-              case .EOF;
-                report_error(iterator, "Unexpected EOF while scanning for end of unhandled object.");
-                return false;
-                
-              case .ERROR;
-                report_error(iterator, "Lexer error while scanning for end of unhandled object.");
-                return false;
-                
-              case .OBJECT_BEGIN;
-                depth += 1;
-                
-              case .OBJECT_END;
-                if depth == 0 { break; }
-                depth -= 1;
-            }
-        }
-        
+    if iterator.type == {
+      case .OBJECT; #through;
       case .ARRAY;
         depth := 0;
         while 1 {
             token := get_token(lexer);
             if token.type == {
               case .EOF;
-                report_error(iterator, "Unexpected EOF while scanning for end of unhandled array.");
+                report_error(iterator, "Unexpected EOF while scanning for end of unhandled %.", iterator.type);
                 return false;
                 
               case .ERROR;
-                report_error(iterator, "Lexer error while scanning for end of unhandled array.");
+                report_error(iterator, "Lexer error while scanning for end of unhandled %.", iterator.type);
                 return false;
                 
               case .ARRAY_BEGIN;
                 depth += 1;
                 
               case .ARRAY_END;
+                if depth == 0 { break; }
+                depth -= 1;
+                
+              case .OBJECT_BEGIN;
+                depth += 1;
+                
+              case .OBJECT_END;
                 if depth == 0 { break; }
                 depth -= 1;
             }
@@ -211,32 +171,14 @@ report_error :: (using iterator: *Iterator, format: string, args: ..Any) {
 } @PrintLike
 
 
-
-/*
-    We can either just have a single parse_field proc which uses reflection to set the field value,
-    OR we can have parse_int, parse_float, parse_string, etc which can be slightly more efficient on account of knowing what the data type is up front
-    OR maybe we even just do both and see what the code looks like in either case...
-    
-    I will probaly do the generic version first since I already have set_value_from_string anyhow
-*/
-
-Field_Iterator :: struct(T: Type = void) #modify {
-    return T == void || T.(*Type_Info).type == .ARRAY, "T must be an array type, or void if no exported 'it' is desired.";
-} {
-    using #as base: Iterator;
-    base.iterator_type = .FIELD;
-    
-    value: string;
-}
-
 // Field parsing is wrapped in a macro so that we can do some funky magic.
 // Mostly for the sake of error handling and doing multi-pass stuff
 // The parse_object and parse_array for expansions maybe in the future get some special logic that will change how parse_field operates on a second validation pass
 parse_field :: (iterator: *Iterator, identifier: string, value: Any) -> bool #expand {
     if iterator.identifier != identifier   return false;
     
-    if !set_value_from_string(value, iterator.(*Field_Iterator).value) {
-        report_error(iterator, "Failed to parse value of type % from string: '%'.", (*value.type).(*Type).*, iterator.(*Field_Iterator).value);
+    if !set_value_from_string(value, iterator.value) {
+        report_error(iterator, "Failed to parse value of type % from string: '%'.", (*value.type).(*Type).*, iterator.value);
         return false;
     }
     
@@ -244,40 +186,50 @@ parse_field :: (iterator: *Iterator, identifier: string, value: Any) -> bool #ex
     return true;
 }
 
-
-
-Object_Iterator :: struct {
-    using #as base: Iterator;
-    base.iterator_type = .OBJECT;
+// This procedure is not intended to be called in the traditional way. 
+// You will notice that it does not in fact actually do any parsing in itself! 
+// Refer to example.jai for proper use.
+parse_object :: inline (iterator: *Iterator, identifier: string = "") -> *Iterator {
+    if iterator.identifier != identifier   return null;
+    if iterator.type != .OBJECT {
+        report_error(iterator, "Expected OBJECT, but got %.", iterator.type);
+        return null;
+    }
+    return iterator;
 }
 
-parse_object :: inline (iterator: *Iterator, identifier: string = "") -> *Object_Iterator {
-    if iterator.iterator_type != .OBJECT 
-    || iterator.identifier    != identifier  return null;
-    
-    return iterator.(*Object_Iterator);
+// This procedure is not intended to be called in the traditional way. 
+// You will notice that it does not in fact actually do any parsing in itself! 
+// Refer to example.jai for proper use.
+parse_array :: inline (iterator: *Iterator, identifier: string = "") -> *Iterator {
+    if iterator.identifier != identifier   return null;
+    if iterator.type != .ARRAY {
+        report_error(iterator, "Expected ARRAY, but got %.", iterator.type);
+        return null;
+    }
+    return iterator;
 }
 
-for_expansion :: (using object_iterator: *Object_Iterator, $body: Code, for_flags: For_Flags) #expand {
-    if object_iterator == null      return;
+for_expansion :: (using iterator: *Iterator, $body: Code, for_flags: For_Flags) #expand {
+    if iterator == null      return;
     
-    if !check_object_end(object_iterator) {
+    if !check_aggr_end(iterator) {
         `it_index := 0;
         while 1 { defer it_index += 1;
-            it_ok, it_union := iterator_next(object_iterator);
+            it_ok, it_union := iterator_next(iterator);
             if !it_ok  return;
             `it := (*it_union).(*Iterator);
             
             #insert body;
             
             if it.flags & .ERROR {
-                object_iterator.flags |= .ERROR;
+                iterator.flags |= .ERROR;
                 return;
             }
             if !(it.flags & .HANDLED)  iterator_skip(it);
             
             expect_another := expect_token_type(*parser.lexer, .COMMA);
-            if check_object_end(object_iterator) {
+            if check_aggr_end(iterator) {
                 if expect_another {
                     report_error(it, "Unexpected comma after field.");
                     return;
@@ -292,67 +244,20 @@ for_expansion :: (using object_iterator: *Object_Iterator, $body: Code, for_flag
         }
     }
     
-    object_iterator.flags |= .HANDLED;
+    iterator.flags |= .HANDLED;
 }
 
-check_object_end :: (using object_iterator: *Object_Iterator) -> bool { 
-    if flags & .IS_ROOT  return expect_token_type(*parser.lexer, .EOF);
-    return expect_token_type(*parser.lexer, .OBJECT_END);
-}
-
-
-
-Array_Iterator :: struct {
-    using #as base: Iterator;
-    base.iterator_type = .ARRAY;
-}
-
-parse_array :: inline (iterator: *Iterator, identifier: string = "") -> *Array_Iterator {
-    if iterator.iterator_type != .ARRAY 
-    || iterator.identifier    != identifier  return null;
-    
-    return iterator.(*Array_Iterator);
-}
-
-for_expansion :: (using array_iterator: *Array_Iterator, $body: Code, for_flags: For_Flags) #expand {
-    if array_iterator == null      return;
-    
-    if !check_array_end(array_iterator) {
-        `it_index := 0;
-        while 1 { defer it_index += 1;
-            it_ok, it_union := iterator_next(array_iterator);
-            if !it_ok  return;
-            `it := (*it_union).(*Iterator);
-            
-            #insert body;
-            
-            if it.flags & .ERROR {
-                array_iterator.flags |= .ERROR;
-                return;
-            }
-            if !(it.flags & .HANDLED)  iterator_skip(it);
-            
-            expect_another := expect_token_type(*parser.lexer, .COMMA);
-            if check_array_end(array_iterator) {
-                if expect_another {
-                    report_error(it, "Unexpected comma after field.");
-                    return;
-                }
-                break;
-            } else {
-                if !expect_another {
-                    report_error(it, "Expected a comma after field.");
-                    return;
-                }
-            }
-        }
+check_aggr_end :: (using iterator: *Iterator) -> bool {
+    if type == {
+      case .OBJECT;
+        return expect_token_type(*parser.lexer, ifx flags & .IS_ROOT then .EOF else .OBJECT_END);
+        
+      case .ARRAY;
+        return expect_token_type(*parser.lexer, .ARRAY_END);
     }
     
-    array_iterator.flags |= .HANDLED;
-}
-
-check_array_end :: (using array_iterator: *Array_Iterator) -> bool { 
-    return expect_token_type(*parser.lexer, .ARRAY_END);
+    assert(false, "Invalid iterator type: %", type);
+    return false;
 }
 
 
@@ -374,6 +279,10 @@ check_array_end :: (using array_iterator: *Array_Iterator) -> bool {
         this will be a bit more tricky to implement since we can only check that all required fields were found in an object when exiting the object's scope
         may require some allocations in order to make this work, or we can instead do a second pass after we are finished parsing an object to run validation code at the end
         this is getting very magical though...
+    
+    In order to prevent duplicated checks for fields which have already been parsed, 
+    we would like that the parse_xxx procs each contain some internal state variables
+    but we cannot do this because there is no 'static' specifier in Jai...
 */
 
 #scope_module
