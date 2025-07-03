@@ -44,7 +44,7 @@ JSON_Iterator :: struct {
     location:   Source_Code_Location;
     flags:      Flags;
     
-    Flags :: enum_flags { IS_ROOT; HANDLED; ERROR; };
+    Flags :: enum_flags { IS_ROOT; HANDLED; };
 }
 
 // Parses the next field in the file, assuming that we are currently inside the parent object/array provided and that object/array is not about to end.
@@ -189,8 +189,6 @@ report_error :: (iterator: *JSON_Iterator, format: string, args: ..Any) {
     builder: String_Builder;
     builder.allocator = temp;
     
-    iterator.flags |= .ERROR;
-    
     format_location(*builder, iterator.location);
     
     append(*builder, "@ ");
@@ -266,10 +264,7 @@ for_expansion :: (using iterator: *JSON_Iterator, $body: Code, for_flags: For_Fl
             
             #insert body;
             
-            if it.flags & .ERROR {
-                iterator.flags |= .ERROR;
-                return;
-            }
+            if parser.error  return;
             if !(it.flags & .HANDLED)  iterator_skip(it);
             
             expect_another := expect_token_type(*parser.lexer, .COMMA);
@@ -329,6 +324,10 @@ check_array_end :: inline (parser: *JSON_Parser) -> bool {
         
     Macro Stuff: 
         This module seems like an interesting test case for macros, since ideally we would be able to add some features that require a sort of communication between nested macros.
+        A lot of the tricky situations that arise here are in trying to reconcile the more declarative/procedural aspects of parsing JSON.
+        The mapping from JSON to internal values is best described declaratively, but any validation code we want to insert into the process needs to be procedural, and arbitrary.
+        We'd like for the JSON parsing control flow to be automated away as much as possible, but we still want some user-defined flow control within particular blocks.
+        No matter how we end up factoring it, the control flow should at least be clear to the user.
         
         TODO: 
             Prevent checking for matches on fields which have already been parsed.
@@ -343,6 +342,12 @@ check_array_end :: inline (parser: *JSON_Parser) -> bool {
                 This could be done in a sort of validation pass, where we instrument the body code to pass some constant VALIDATION_PASS flag to all calls to parse_field, then include an #if VALIDATION_PASS code path 
                 This would be very magical though, and perhaps that's not what most users would want. However, it's still quite interesting to try!
             
+            Early exit loop body once we've found the matching field.
+                As it currently stands, we will check the iterator against every parse_field call, every time.
+                Ideally, we would break from the body code after a call to parse_field returns true.
+                But, we also want to be able to run arbitrary logic when read_field succeeds.
+                We could use another for expansion on parse_field that allows for running user code on success, but still allows the the automatic control flow.
+                This is another really good use case for the `do` macro, since we want for-like macro capabilities for a non-iteration application.
     
     Using the Context:
         When I first started writing this parser I was using the Context to store the parser data instead of requiring the user to pass an iterator to every parse_xxx call.

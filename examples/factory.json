@@ -1,0 +1,24 @@
+"factory": {
+    "id": 123,
+    "name": "Stuart's Little Factory",
+    "products": [
+        {
+            "id": 1,
+            "name": "Widget",
+            "price": 25,
+            "count_produced": 100000
+        },
+        {
+            "id": 2,
+            "name": "Springs",
+            "price": 5,
+            "count_produced": 100000000
+        },
+        {
+            "id": 3,
+            "name": "Sprockets",
+            "price": 50,
+            "count_produced": 25000
+        }
+    ]
+}
