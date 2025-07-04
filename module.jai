@@ -348,7 +348,10 @@ check_array_end :: inline (parser: *JSON_Parser) -> bool {
                 But, we also want to be able to run arbitrary logic when read_field succeeds.
                 We could use another for expansion on parse_field that allows for running user code on success, but still allows the the automatic control flow.
                 This is another really good use case for the `do` macro, since we want for-like macro capabilities for a non-iteration application.
-    
+                
+                I've now also tried using a standard macro for parse_object and pasrse_array instead of a for_expansion, 
+                but the compiler is still not willing to let me break from one macro into another.
+            
     Using the Context:
         When I first started writing this parser I was using the Context to store the parser data instead of requiring the user to pass an iterator to every parse_xxx call.
         While this makes the user code slightly cleaner, I ultimately decided it was better to avoid using the Context in this way unless it was going to provide a substantial benefit.
@@ -356,6 +359,9 @@ check_array_end :: inline (parser: *JSON_Parser) -> bool {
         
         My proposal for a `do` keyword for multi-block macros sort of attempts to solve this case where we would like a macro to set up a temporary context for some complex procedure.
         (Perhaps I will rewrite my thoughts on this and try to make a case for its utility.)
+        There's already several drawbacks in using a standard macro instead of a for expansion (though maybe I could work around some of those),
+        but the `#code` everywhere is unavoidable and really adds a surprising amount of visual clutter.
+        
         
         
     
